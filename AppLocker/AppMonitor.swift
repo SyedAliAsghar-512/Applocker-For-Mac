@@ -1,41 +1,39 @@
 import AppKit
 
-final class AppMonitor {
-    private let rules: RulesStore
-    private let auth = AuthManager()
-    private var allowUntil: [String: Date] = [:] // bundleID -> expiry
+/// Detects app switches and optionally locks.
+class AppMonitor {
+    static let shared = AppMonitor()
+    private init() {}
 
-    init(rules: RulesStore) {
-        self.rules = rules
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(appLaunched(_:)),
-            name: NSWorkspace.didLaunchApplicationNotification,
-            object: nil
-        )
+    private var observer: Any?
+
+    func start() {
+        observer = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleActivation(notification)
+        }
     }
 
-    @objc private func appLaunched(_ note: Notification) {
-        guard let info = note.userInfo,
-              let app = info[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+    func stop() {
+        if let obs = observer {
+            NSWorkspace.shared.notificationCenter.removeObserver(obs)
+        }
+    }
+
+    private func handleActivation(_ note: Notification) {
+        let mgr = LockManager.shared
+        guard mgr.lockOnAppSwitch, !mgr.isLocked else { return }
+
+        guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
               let bundleID = app.bundleIdentifier else { return }
 
-        guard rules.lockedApps.contains(where: { $0.id == bundleID }) else { return }
+        let selfBundle = Bundle.main.bundleIdentifier ?? ""
+        let allowlist: Set<String> = [selfBundle, "com.apple.loginwindow"]
+        guard !allowlist.contains(bundleID) else { return }
 
-        if let expiry = allowUntil[bundleID], expiry > Date() {
-            return
-        }
-
-        app.terminate()
-
-        auth.authenticate(reason: "Unlock \(app.localizedName ?? "App")") { [weak self] success in
-            guard let self else { return }
-            if success, let url = app.bundleURL {
-                let timeoutMinutes = UserDefaults.standard.integer(forKey: "unlockTimeoutMinutes")
-                let minutes = max(timeoutMinutes, 1)
-                self.allowUntil[bundleID] = Date().addingTimeInterval(TimeInterval(minutes * 60))
-                NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
-            }
-        }
+        mgr.lock(reason: .appSwitch)
     }
 }
